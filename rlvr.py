@@ -447,3 +447,73 @@ for k, v in breakdown.items():
     avg = sum(v) / len(v)
     pct_nonzero = 100 * sum(1 for x in v if x > 0) / len(v)
     print(f"  {k:<14}: avg={avg:+.4f}  fired_in={pct_nonzero:5.1f}% of samples")
+
+
+# Diagnostic summary
+
+avg_correct = sum(breakdown["correctness"]) / len(breakdown["correctness"])
+avg_format = sum(breakdown["strict_format"]) / len(breakdown["strict_format"])
+avg_xml = sum(breakdown["xmlcount"]) / len(breakdown["xmlcount"])
+
+# Reward std diagnostic
+import numpy as np
+final_std = np.mean(reward_stds[-10:]) if reward_stds else 0
+initial_std = np.mean(reward_stds[:10]) if len(reward_stds) >= 10 else 0
+
+print("=" * 60)
+print("DIAGNOSTIC SUMMARY")
+print("=" * 60)
+print(f"\n1. Did reasoning emerge?")
+print(f"   correctness_reward avg: {avg_correct:.4f}")
+if avg_correct > 0.5:
+    print("   --> YES, model is producing some correct answers")
+elif avg_correct > 0.1:
+    print("   --> PARTIAL, occasional correct answers")
+else:
+    print("   --> NO, model essentially never produces correct answers")
+
+print(f"\n2. Is the model exploring different responses?")
+print(f"   reward_std initial: {initial_std:.4f}")
+print(f"   reward_std final:   {final_std:.4f}")
+if final_std < 0.01:
+    print("   --> COLLAPSED: all generations identical, no learning signal")
+elif final_std > initial_std * 1.5:
+    print("   --> HEALTHY: model exploring different responses")
+else:
+    print("   --> WEAK: limited diversity in generations")
+
+print(f"\n3. Did the model learn the format?")
+print(f"   strict_format_reward avg: {avg_format:.4f}")
+print(f"   xmlcount_reward avg:      {avg_xml:.4f}")
+if avg_format > 0.3:
+    print("   --> YES, model produces correct XML structure")
+elif avg_xml > 0.1:
+    print("   --> PARTIAL, model produces some XML tags")
+else:
+    print("   --> NO, model doesn't reliably produce structure")
+
+print(f"\n" + "=" * 60)
+print("THE LESSON")
+print("=" * 60)
+print('''
+SmolLM-135M is below the model-size floor for GRPO.
+
+Reason: GRPO REINFORCES existing behaviors. It does not
+TEACH new ones from scratch.
+
+For reasoning to emerge, the base model must occasionally:
+  - Produce something that looks like reasoning
+  - Produce structured outputs (XML tags)
+  - Get math problems right by chance
+
+A 135M-parameter model rarely does any of these.
+A 1.5B model occasionally does ALL of them.
+
+Once the base model occasionally produces good outputs, GRPO
+amplifies that frequency. Without that seed behavior, GRPO
+just bounces randomly with no signal to lock onto.
+
+This is THE practical lesson of RL for LLMs:
+  Algorithm capacity is bounded by base-model capacity.
+  RL polishes. RL amplifies. RL does not teach.
+''')
