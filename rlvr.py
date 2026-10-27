@@ -186,3 +186,45 @@ def xmlcount_reward_func(completions, **kwargs):
 
 print("[OK] 5 reward functions defined")
 print("     Max possible reward per response: +4.0")
+
+# Three test responses, increasing in quality
+
+def fake_completion(text):
+    '''Mimic the structure GRPO trainer passes — list of [{role, content}].'''
+    return [[{"role": "assistant", "content": text}]]
+
+# 1. Garbage response — no format, no structure
+test1 = fake_completion("the answer is probably 42 because reasons")
+
+# 2. Has format but wrong answer
+test2 = fake_completion('''<reasoning>
+let me think
+</reasoning>
+<answer>
+42
+</answer>''')
+
+# 3. Perfect — format AND right answer
+test3 = fake_completion('''<reasoning>
+18 multiplied by 7 is 126
+</reasoning>
+<answer>
+126
+</answer>''')
+
+ground_truth = ["126"]
+
+for i, c in enumerate([test1, test2, test3], 1):
+    print(f"\n=== Test {i} ===")
+    print(f"Response: {c[0][0]['content'][:80]}...")
+    print(f"  correctness:    {correctness_reward_func(None, c, ground_truth)[0]:+.2f}")
+    print(f"  int_reward:     {int_reward_func(c)[0]:+.2f}")
+    print(f"  strict_format:  {strict_format_reward_func(c)[0]:+.2f}")
+    print(f"  soft_format:    {soft_format_reward_func(c)[0]:+.2f}")
+    print(f"  xmlcount:       {xmlcount_reward_func(c)[0]:+.4f}")
+    total = (correctness_reward_func(None, c, ground_truth)[0]
+             + int_reward_func(c)[0]
+             + strict_format_reward_func(c)[0]
+             + soft_format_reward_func(c)[0]
+             + xmlcount_reward_func(c)[0])
+    print(f"  TOTAL:          {total:+.4f}")
