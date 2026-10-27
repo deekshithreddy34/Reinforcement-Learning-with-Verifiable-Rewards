@@ -405,3 +405,45 @@ else:
     plt.savefig("/content/grpo_metrics.png", dpi=80)
     plt.show()
     print(f"\n[OK] Plotted {len(steps)} steps")
+
+
+# Sample 20 prompts and break down the reward
+N_SAMPLES = 20
+
+FastLanguageModel.for_inference(model)
+breakdown = {
+    "correctness": [], "int": [], "strict_format": [],
+    "soft_format": [], "xmlcount": [],
+}
+
+import random
+test_indices = random.sample(range(len(dataset)), N_SAMPLES)
+
+print("Sampling 20 random training prompts post-GRPO...\n")
+for i, idx in enumerate(test_indices):
+    sample = dataset[idx]
+    p = tokenizer.apply_chat_template(sample["prompt"], tokenize=False, add_generation_prompt=True)
+    inp = tokenizer(p, return_tensors="pt").to("cuda")
+    with torch.no_grad():
+        out = model.generate(
+            **inp, max_new_tokens=300, do_sample=True,
+            temperature=0.8, top_p=0.95,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    resp = tokenizer.decode(out[0][inp.input_ids.shape[1]:], skip_special_tokens=True)
+    fake = fake_completion(resp)
+
+    breakdown["correctness"].append(correctness_reward_func(None, fake, [sample["answer"]])[0])
+    breakdown["int"].append(int_reward_func(fake)[0])
+    breakdown["strict_format"].append(strict_format_reward_func(fake)[0])
+    breakdown["soft_format"].append(soft_format_reward_func(fake)[0])
+    breakdown["xmlcount"].append(xmlcount_reward_func(fake)[0])
+
+    print(f"  [{i+1:2d}/{N_SAMPLES}] correct={breakdown['correctness'][-1]:.1f}  "
+          f"format={breakdown['strict_format'][-1]:.1f}  xml={breakdown['xmlcount'][-1]:.3f}")
+
+print(f"\n=== AVERAGE REWARD BY FUNCTION (across {N_SAMPLES} samples) ===")
+for k, v in breakdown.items():
+    avg = sum(v) / len(v)
+    pct_nonzero = 100 * sum(1 for x in v if x > 0) / len(v)
+    print(f"  {k:<14}: avg={avg:+.4f}  fired_in={pct_nonzero:5.1f}% of samples")
