@@ -228,3 +228,180 @@ for i, c in enumerate([test1, test2, test3], 1):
              + soft_format_reward_func(c)[0]
              + xmlcount_reward_func(c)[0])
     print(f"  TOTAL:          {total:+.4f}")
+
+
+# Generate a baseline response BEFORE GRPO training
+FastLanguageModel.for_inference(model)
+
+# Take a question from the dataset
+sample_q = dataset[0]
+prompt = tokenizer.apply_chat_template(
+    sample_q["prompt"],
+    tokenize=False,
+    add_generation_prompt=True,
+)
+
+print("=== QUESTION ===")
+print(sample_q["prompt"][1]["content"])
+print(f"\n=== EXPECTED ANSWER ===")
+print(sample_q["answer"])
+
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=400,
+        do_sample=True,
+        temperature=0.8,
+        top_p=0.95,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+print(f"\n=== BASELINE MODEL OUTPUT (before GRPO) ===")
+print(response)
+print(f"\n=== AUTOMATED REWARD SCORE ===")
+fake = fake_completion(response)
+total = (correctness_reward_func(None, fake, [sample_q["answer"]])[0]
+         + int_reward_func(fake)[0]
+         + strict_format_reward_func(fake)[0]
+         + soft_format_reward_func(fake)[0]
+         + xmlcount_reward_func(fake)[0])
+print(f"Total reward: {total:+.4f} (out of max +4.0)")
+
+
+from unsloth import PatchFastRL
+PatchFastRL("GRPO", FastLanguageModel)
+
+from trl import GRPOConfig, GRPOTrainer
+
+# Critical hyperparameters for GRPO
+training_args = GRPOConfig(
+    output_dir = "outputs",
+
+    # --- Learning rate (same as DPO range) ---
+    learning_rate = 5e-6,
+    adam_beta1 = 0.9,
+    adam_beta2 = 0.99,
+    weight_decay = 0.1,
+    warmup_ratio = 0.1,
+    lr_scheduler_type = "cosine",
+    optim = "paged_adamw_8bit",
+
+    # --- The "G" in GRPO ---
+    num_generations = 4,         # Reduced from default 6 for T4 memory
+    # Each step generates 4 different responses to the SAME prompt
+    # The advantage is computed RELATIVE to these 4 responses
+
+    # --- Batch sizes ---
+    per_device_train_batch_size = 1,
+    gradient_accumulation_steps = 1,
+
+    # --- Sequence lengths ---
+    max_prompt_length = 256,
+    max_completion_length = 512,
+
+    # --- Training duration ---
+    max_steps = 100,             # Demo only — production needs 300+
+    save_steps = 50,
+    logging_steps = 1,
+
+    # --- Other ---
+    max_grad_norm = 0.1,
+    report_to = "none",
+    seed = SEED,
+
+    # --- Use TRL's reference (no vLLM for tiny models) ---
+    use_vllm = False,
+)
+
+print("[OK] GRPOConfig ready")
+print(f"     Group size (num_generations): {training_args.num_generations}")
+print(f"     Max steps: {training_args.max_steps}")
+print(f"     Learning rate: {training_args.learning_rate}")
+
+# Switch back to training mode and train
+FastLanguageModel.for_training(model)
+
+trainer_stats = trainer.train()
+
+print("\n[OK] GRPO training complete")
+print(f"Final loss: {trainer_stats.training_loss:.4f}")
+
+
+# Generate after-training output on the same question
+FastLanguageModel.for_inference(model)
+
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=400,
+        do_sample=True,
+        temperature=0.8,
+        top_p=0.95,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+response_after = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+print("=== QUESTION ===")
+print(sample_q["prompt"][1]["content"])
+print(f"\n=== EXPECTED ANSWER ===")
+print(sample_q["answer"])
+
+print(f"\n=== AFTER GRPO TRAINING ===")
+print(response_after)
+print(f"\n=== REWARD ===")
+fake = fake_completion(response_after)
+total = (correctness_reward_func(None, fake, [sample_q["answer"]])[0]
+         + int_reward_func(fake)[0]
+         + strict_format_reward_func(fake)[0]
+         + soft_format_reward_func(fake)[0]
+         + xmlcount_reward_func(fake)[0])
+print(f"Total: {total:+.4f}")
+
+
+import matplotlib.pyplot as plt
+
+# Pull metrics from the trainer's log history
+log_history = trainer.state.log_history
+
+steps, rewards, reward_stds, completion_lengths, kls = [], [], [], [], []
+for entry in log_history:
+    if "reward" in entry:
+        steps.append(entry.get("step", 0))
+        rewards.append(entry.get("reward", 0))
+        reward_stds.append(entry.get("reward_std", 0))
+        completion_lengths.append(entry.get("completion_length", 0))
+        kls.append(entry.get("kl", 0))
+
+if not steps:
+    print("[WARN] No reward logs found")
+else:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+
+    axes[0,0].plot(steps, rewards, color='#3498db')
+    axes[0,0].set_title("Total Reward over training")
+    axes[0,0].set_xlabel("Step"); axes[0,0].set_ylabel("Reward")
+    axes[0,0].axhline(y=0, color='gray', linestyle='--', alpha=0.3)
+    axes[0,0].grid(alpha=0.3)
+
+    axes[0,1].plot(steps, reward_stds, color='#e74c3c')
+    axes[0,1].set_title("Reward Std (group diversity)")
+    axes[0,1].set_xlabel("Step"); axes[0,1].set_ylabel("Std")
+    axes[0,1].grid(alpha=0.3)
+
+    axes[1,0].plot(steps, completion_lengths, color='#2ecc71')
+    axes[1,0].set_title("Completion Length")
+    axes[1,0].set_xlabel("Step"); axes[1,0].set_ylabel("Tokens")
+    axes[1,0].grid(alpha=0.3)
+
+    axes[1,1].plot(steps, kls, color='#9b59b6')
+    axes[1,1].set_title("KL from Reference")
+    axes[1,1].set_xlabel("Step"); axes[1,1].set_ylabel("KL")
+    axes[1,1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("/content/grpo_metrics.png", dpi=80)
+    plt.show()
+    print(f"\n[OK] Plotted {len(steps)} steps")
